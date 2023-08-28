@@ -14,6 +14,9 @@ from flytekit.exceptions.user import FlyteAssertion, FlyteEntityNotExistExceptio
 from flytekit.extras.sqlite3.task import SQLite3Config, SQLite3Task
 from flytekit.remote.remote import FlyteRemote
 from flytekit.types.schema import FlyteSchema
+from flytekit.core.task import reference_task
+from flytekit.core.workflow import reference_workflow
+from flytekit.core.launch_plan import reference_launch_plan
 
 PROJECT = "flytesnacks"
 VERSION = os.getpid()
@@ -329,3 +332,55 @@ def test_fetch_not_exist_launch_plan(flyteclient):
     remote = FlyteRemote(Config.auto(), PROJECT, "development")
     with pytest.raises(FlyteEntityNotExistException):
         remote.fetch_launch_plan(name="workflows.basic.list_float_wf.fake_wf", version=f"v{VERSION}")
+
+def test_execute_reference_task(flyteclient, flyte_workflows_register, flyte_remote_env):
+    @reference_task(
+        project=PROJECT,
+        domain="development",
+        name="workflows.basic.basic_workflow.t1",
+        version=f"v{VERSION}",
+    )
+    def t1(a: int) -> typing.NamedTuple("OutputsBC", t1_int_output=int, c=str):
+        ...
+    remote = FlyteRemote(Config.auto(), PROJECT, "development")
+    # Run Task
+    execution = remote.execute(
+        t1,
+        inputs={"a": 10},
+        wait=True,
+        overwrite_cache=True,
+        envs={"foo": "bar"},
+        tags=["flyte"],
+    )
+    assert execution.outputs["t1_int_output"] == 12
+    assert execution.outputs["c"] == "world"
+    assert execution.spec.envs == {"foo": "bar"}
+    assert execution.spec.tags == ["flyte"]
+
+def test_execute_reference_workflow(flyteclient, flyte_workflows_register, flyte_remote_env):
+    @reference_workflow(
+        project=PROJECT,
+        domain="development",
+        name="workflows.basic.hello_world.my_wf",
+        version=f"v{VERSION}",
+    )
+    def my_wf(a: int, b: str) -> (int, str):
+        ...
+    remote = FlyteRemote(Config.auto(), PROJECT, "development")
+    execution = remote.execute(my_wf, inputs={"a": 10, "b": "xyz"}, wait=True)
+    assert execution.outputs["o0"] == 12
+    assert execution.outputs["o1"] == "xyzworld"
+
+def test_execute_reference_launchplan(flyteclient, flyte_workflows_register, flyte_remote_env):
+    @reference_launch_plan(
+        project=PROJECT,
+        domain="development",
+        name="workflows.basic.hello_world.my_wf",
+        version=f"v{VERSION}",
+    )
+    def my_wf(a: int, b: str) -> (int, str):
+        ...
+    remote = FlyteRemote(Config.auto(), PROJECT, "development")
+    execution = remote.execute(my_wf, inputs={"a": 10, "b": "xyz"}, wait=True)
+    assert execution.outputs["o0"] == 12
+    assert execution.outputs["o1"] == "xyzworld"
