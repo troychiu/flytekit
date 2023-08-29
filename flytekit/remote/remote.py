@@ -1358,8 +1358,7 @@ class FlyteRemote(object):
         envs: typing.Optional[typing.Dict[str, str]] = None,
         tags: typing.Optional[typing.List[str]] = None,
     ) -> FlyteWorkflowExecution:
-        """Execute a ReferenceTask.
-        """
+        """Execute a ReferenceTask."""
         resolved_identifiers = ResolvedIdentifiers(
             project=entity.reference.project,
             domain=entity.reference.domain,
@@ -1370,8 +1369,10 @@ class FlyteRemote(object):
         try:
             flyte_task: FlyteTask = self.fetch_task(**resolved_identifiers_dict)
         except FlyteEntityNotExistException:
-            raise ValueError(f'missing entity of type ReferenceTask with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"')
-        
+            raise ValueError(
+                f'missing entity of type ReferenceTask with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"'
+            )
+
         return self.execute(
             flyte_task,
             inputs,
@@ -1400,8 +1401,7 @@ class FlyteRemote(object):
         envs: typing.Optional[typing.Dict[str, str]] = None,
         tags: typing.Optional[typing.List[str]] = None,
     ) -> FlyteWorkflowExecution:
-        """Execute a ReferenceWorkflow.
-        """
+        """Execute a ReferenceWorkflow."""
         resolved_identifiers = ResolvedIdentifiers(
             project=entity.reference.project,
             domain=entity.reference.domain,
@@ -1412,8 +1412,10 @@ class FlyteRemote(object):
         try:
             self.fetch_workflow(**resolved_identifiers_dict)
         except FlyteEntityNotExistException:
-            raise ValueError(f'missing entity of type ReferenceWorkflow with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"')
-        
+            raise ValueError(
+                f'missing entity of type ReferenceWorkflow with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"'
+            )
+
         try:
             flyte_lp = self.fetch_launch_plan(**resolved_identifiers_dict)
         except FlyteEntityNotExistException:
@@ -1456,8 +1458,7 @@ class FlyteRemote(object):
         envs: typing.Optional[typing.Dict[str, str]] = None,
         tags: typing.Optional[typing.List[str]] = None,
     ) -> FlyteWorkflowExecution:
-        """Execute a ReferenceLaunchPlan.
-        """
+        """Execute a ReferenceLaunchPlan."""
         resolved_identifiers = ResolvedIdentifiers(
             project=entity.reference.project,
             domain=entity.reference.domain,
@@ -1468,8 +1469,10 @@ class FlyteRemote(object):
         try:
             flyte_launchplan: FlyteLaunchPlan = self.fetch_launch_plan(**resolved_identifiers_dict)
         except FlyteEntityNotExistException:
-            raise ValueError(f'missing entity of type ReferenceLaunchPlan with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"')
-        
+            raise ValueError(
+                f'missing entity of type ReferenceLaunchPlan with identifier project:"{entity.reference.project}" domain:"{entity.reference.domain}" name:"{entity.reference.name}" version:"{entity.reference.version}"'
+            )
+
         return self.execute(
             flyte_launchplan,
             inputs,

@@ -10,13 +10,13 @@ import pytest
 
 from flytekit import LaunchPlan, kwtypes
 from flytekit.configuration import Config
+from flytekit.core.launch_plan import reference_launch_plan
+from flytekit.core.task import reference_task
+from flytekit.core.workflow import reference_workflow
 from flytekit.exceptions.user import FlyteAssertion, FlyteEntityNotExistException
 from flytekit.extras.sqlite3.task import SQLite3Config, SQLite3Task
 from flytekit.remote.remote import FlyteRemote
 from flytekit.types.schema import FlyteSchema
-from flytekit.core.task import reference_task
-from flytekit.core.workflow import reference_workflow
-from flytekit.core.launch_plan import reference_launch_plan
 
 PROJECT = "flytesnacks"
 VERSION = os.getpid()
@@ -333,6 +333,7 @@ def test_fetch_not_exist_launch_plan(flyteclient):
     with pytest.raises(FlyteEntityNotExistException):
         remote.fetch_launch_plan(name="workflows.basic.list_float_wf.fake_wf", version=f"v{VERSION}")
 
+
 def test_execute_reference_task(flyteclient, flyte_workflows_register, flyte_remote_env):
     @reference_task(
         project=PROJECT,
@@ -342,6 +343,7 @@ def test_execute_reference_task(flyteclient, flyte_workflows_register, flyte_rem
     )
     def t1(a: int) -> typing.NamedTuple("OutputsBC", t1_int_output=int, c=str):
         ...
+
     remote = FlyteRemote(Config.auto(), PROJECT, "development")
     # Run Task
     execution = remote.execute(
@@ -354,8 +356,9 @@ def test_execute_reference_task(flyteclient, flyte_workflows_register, flyte_rem
     )
     assert execution.outputs["t1_int_output"] == 12
     assert execution.outputs["c"] == "world"
-    assert execution.spec.envs == {"foo": "bar"}
+    assert execution.spec.envs.envs == {"foo": "bar"}
     assert execution.spec.tags == ["flyte"]
+
 
 def test_execute_reference_workflow(flyteclient, flyte_workflows_register, flyte_remote_env):
     @reference_workflow(
@@ -366,10 +369,21 @@ def test_execute_reference_workflow(flyteclient, flyte_workflows_register, flyte
     )
     def my_wf(a: int, b: str) -> (int, str):
         ...
+
     remote = FlyteRemote(Config.auto(), PROJECT, "development")
-    execution = remote.execute(my_wf, inputs={"a": 10, "b": "xyz"}, wait=True)
+    execution = remote.execute(
+        my_wf,
+        inputs={"a": 10, "b": "xyz"},
+        wait=True,
+        overwrite_cache=True,
+        envs={"foo": "bar"},
+        tags=["flyte"],
+    )
     assert execution.outputs["o0"] == 12
     assert execution.outputs["o1"] == "xyzworld"
+    assert execution.spec.envs.envs == {"foo": "bar"}
+    assert execution.spec.tags == ["flyte"]
+
 
 def test_execute_reference_launchplan(flyteclient, flyte_workflows_register, flyte_remote_env):
     @reference_launch_plan(
@@ -380,7 +394,17 @@ def test_execute_reference_launchplan(flyteclient, flyte_workflows_register, fly
     )
     def my_wf(a: int, b: str) -> (int, str):
         ...
+
     remote = FlyteRemote(Config.auto(), PROJECT, "development")
-    execution = remote.execute(my_wf, inputs={"a": 10, "b": "xyz"}, wait=True)
+    execution = remote.execute(
+        my_wf,
+        inputs={"a": 10, "b": "xyz"},
+        wait=True,
+        overwrite_cache=True,
+        envs={"foo": "bar"},
+        tags=["flyte"],
+    )
     assert execution.outputs["o0"] == 12
     assert execution.outputs["o1"] == "xyzworld"
+    assert execution.spec.envs.envs == {"foo": "bar"}
+    assert execution.spec.tags == ["flyte"]
