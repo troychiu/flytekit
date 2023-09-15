@@ -235,6 +235,7 @@ class FlyteRemote(object):
         individual Literals for singular requests), or HTML if passed a deck link, or bytes containing HTML,
         if ipython is not available locally.
         """
+        print("remote get")
         if flyte_uri is None:
             raise user_exceptions.FlyteUserException("flyte_uri cannot be empty")
         ctx = self._ctx or FlyteContextManager.current_context()

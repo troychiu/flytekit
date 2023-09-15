@@ -302,7 +302,7 @@ def reference_task(
     project: str,
     domain: str,
     name: str,
-    version: str,
+    version: str = "",
 ) -> Callable[[Callable[..., Any]], ReferenceTask]:
     """
     A reference task is a pointer to a task that already exists on your Flyte installation. This

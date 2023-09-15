@@ -33,6 +33,7 @@ from flytekit.core.utils import timeit
 from flytekit.exceptions.user import FlyteAssertion
 from flytekit.interfaces.random import random
 from flytekit.loggers import logger
+from flytekit.core.rustS3 import RustS3FileSystem
 
 # Refer to https://github.com/fsspec/s3fs/blob/50bafe4d8766c3b2a4e1fc09669cf02fb2d71454/s3fs/core.py#L198
 # for key and secret
@@ -87,6 +88,7 @@ class FileAccessProvider(object):
 
         self._data_config = data_config if data_config else DataConfig.auto()
         self._default_protocol = get_protocol(raw_output_prefix)
+        print(self._default_protocol)
         self._default_remote = cast(fsspec.AbstractFileSystem, self.get_filesystem(self._default_protocol))
         if os.name == "nt" and raw_output_prefix.startswith("file://"):
             raise FlyteAssertion("Cannot use the file:// prefix on Windows.")
@@ -114,7 +116,9 @@ class FileAccessProvider(object):
         elif protocol == "s3":
             s3kwargs = s3_setup_args(self._data_config.s3, anonymous=anonymous)
             s3kwargs.update(kwargs)
-            return fsspec.filesystem(protocol, **s3kwargs)  # type: ignore
+            breakpoint()
+            return RustS3FileSystem(**s3kwargs)
+            # return fsspec.filesystem(protocol, **s3kwargs)  # type: ignore
         elif protocol == "gs":
             if anonymous:
                 kwargs["token"] = _ANON
@@ -184,7 +188,9 @@ class FileAccessProvider(object):
             raise oe
 
     def get(self, from_path: str, to_path: str, recursive: bool = False, **kwargs):
+        print("File access provider get")
         file_system = self.get_filesystem_for_path(from_path)
+        print(file_system, from_path, to_path)
         if recursive:
             from_path, to_path = self.recursive_paths(from_path, to_path)
         try:
@@ -204,7 +210,9 @@ class FileAccessProvider(object):
             raise oe
 
     def put(self, from_path: str, to_path: str, recursive: bool = False, **kwargs):
+        print("File access provider put")
         file_system = self.get_filesystem_for_path(to_path)
+        print(file_system, from_path, to_path)
         from_path = self.strip_file_header(from_path)
         if recursive:
             # Only check this for the local filesystem
