@@ -23,7 +23,7 @@ class RustS3FileSystem(S3FileSystem):
     async def _put_file(self, lpath, rpath, callback=_DEFAULT_CALLBACK, **kwargs):
         print("Rust put_file is called")
         bucket, key, _ = self.split_path(rpath)
-        await asyncio.to_thread(self.s.put_file3, lpath, bucket, key)
+        await asyncio.to_thread(self.s.put_file, lpath, bucket, key)
 
     async def _get_file(self, lpath, rpath, callback=_DEFAULT_CALLBACK, **kwargs):
         print("Rust get_file is called")

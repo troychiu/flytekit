@@ -5,7 +5,9 @@ use aws_smithy_http::byte_stream::{ByteStream, Length};
 use futures::future::join_all;
 use pyo3::exceptions::{self};
 use pyo3::prelude::*;
-use aws_sdk_s3::{config::Region, Client};
+use aws_sdk_s3::{config::Region, Client, Error};
+use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
 
 const CHUNK_SIZE: u64 = 1024 * 1024 * 50;
 const READCHUNK: u64 = 1024 * 1024 * 50;
@@ -39,33 +41,16 @@ fn build_client(endpoint: &str) -> aws_sdk_s3::Client {
     Client::from_conf(s3_conf)
 }
 
-// Extract path into bucket + prefix
-fn path_to_bucketprefix(path: &String) -> (String, String) {
-    let s3path = std::path::Path::new(path);
-    let mut path_it = s3path.iter();
-    let bucket = path_it.next().unwrap().to_str().unwrap();
-    let mut prefix_path = std::path::PathBuf::new();
-    for p in path_it {
-        prefix_path.push(p);
-    }
-    let mut prefix = prefix_path.to_str().unwrap().to_string();
-    if path.ends_with('/') {
-        prefix.push('/');
-    }
-
-    (bucket.to_string(), prefix)
-}
-
 // Write contents of ByteStream into destination buffer.
-// async fn drain_stream(mut s: ByteStream, dest: &mut [u8]) -> Result<usize, Error> {
-//     let mut offset = 0;
-//     while let Ok(Some(bytes)) = s.try_next().await {
-//         let span = offset..offset + bytes.len();
-//         dest[span].clone_from_slice(&bytes);
-//         offset += bytes.len();
-//     }
-//     Ok(offset)
-// }
+async fn drain_stream(mut s: ByteStream, dest: &mut [u8]) -> Result<usize, Error> {
+    let mut offset = 0;
+    while let Ok(Some(bytes)) = s.try_next().await {
+        let span = offset..offset + bytes.len();
+        dest[span].clone_from_slice(&bytes);
+        offset += bytes.len();
+    }
+    Ok(offset)
+}
 
 // async fn write_buffer(mut body: ByteStream, file: &mut File) -> Result<(), Error> {
 //     while let Ok(Some(bytes)) = body.try_next().await {
@@ -91,77 +76,7 @@ impl S3FileSystem {
         }
     }
 
-    pub fn put_file2(&self, lpath: String, bucket: String, key: String) -> PyResult<()> {
-        let client = self.get_client();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let file_size = std::fs::metadata(&lpath).unwrap().len();
-            let mut chunk_count = (file_size / CHUNK_SIZE) + 1;
-            let mut size_of_last_chunk = file_size % CHUNK_SIZE;
-            if size_of_last_chunk == 0 {
-                size_of_last_chunk = CHUNK_SIZE;
-                chunk_count -= 1;
-            }
-            
-            let multipart_upload_res: CreateMultipartUploadOutput = client
-                .create_multipart_upload()
-                .bucket(&bucket)
-                .key(&key)
-                .send()
-                .await
-                .unwrap();
-            let upload_id = multipart_upload_res.upload_id.unwrap();
-            let mut upload_parts: Vec<CompletedPart> = Vec::new();
-            for chunk_index in 0..chunk_count {
-                let this_chunk = if chunk_count - 1 == chunk_index {
-                    size_of_last_chunk
-                } else {
-                    CHUNK_SIZE
-                };
-                let stream = ByteStream::read_from()
-                    .path(&lpath)
-                    .offset(chunk_index * CHUNK_SIZE)
-                    .length(Length::Exact(this_chunk))
-                    .build()
-                    .await
-                    .unwrap();
-                //Chunk index needs to start at 0, but part numbers start at 1.
-                let part_number = (chunk_index as i32) + 1;
-                let upload_part_res = client
-                    .upload_part()
-                    .key(&key)
-                    .bucket(&bucket)
-                    .upload_id(&upload_id)
-                    .body(stream)
-                    .part_number(part_number)
-                    .send()
-                    .await
-                    .unwrap();
-                upload_parts.push(
-                    CompletedPart::builder()
-                        .e_tag(upload_part_res.e_tag.unwrap_or_default())
-                        .part_number(part_number)
-                        .build(),
-                );
-            }
-            let completed_multipart_upload: CompletedMultipartUpload = CompletedMultipartUpload::builder()
-                .set_parts(Some(upload_parts))
-                .build();
-        
-            let _complete_multipart_upload_res = client
-                .complete_multipart_upload()
-                .bucket(&bucket)
-                .key(&key)
-                .multipart_upload(completed_multipart_upload)
-                .upload_id(&upload_id)
-                .send()
-                .await
-                .unwrap();
-        });
-        Ok(())
-    }
-
-    pub fn put_file3(&self, lpath: String, bucket: String, key: String) -> PyResult<()> {
+    pub fn put_file(&self, lpath: String, bucket: String, key: String) -> PyResult<()> {
         let client = self.get_client();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -240,6 +155,64 @@ impl S3FileSystem {
                 .await
                 .unwrap();
         });
+        Ok(())
+    }
+
+    pub fn get_file(&self, lpath: String, bucket: String, key: String) -> PyResult<()> {
+        let client = self.get_client();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+    
+        rt.block_on(async {
+            // 1. Determine the size of the object in S3.
+            let head_object_output = client.head_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .unwrap();
+            let file_size = head_object_output.content_length() as u64;
+    
+            // 2. Split the object's byte range into chunks.
+            let mut chunk_count = file_size / CHUNK_SIZE;
+            if file_size % CHUNK_SIZE > 0 {
+                chunk_count += 1;
+            }
+    
+            // 3. Download each chunk concurrently.
+            let download_futures: Vec<_> = (0..chunk_count).map(|chunk_index| {
+                let client = &client;
+                let bucket = &bucket;
+                let key = &key;
+            
+                async move {
+                    let start_byte = chunk_index * CHUNK_SIZE;
+                    let end_byte = std::cmp::min(start_byte + CHUNK_SIZE, file_size) - 1;
+                    
+                    let get_object_output = client.get_object()
+                        .bucket(bucket)
+                        .key(key)
+                        .range(&format!("bytes={}-{}", start_byte, end_byte))
+                        .send()
+                        .await
+                        .unwrap();
+            
+                    let chunk_size = (end_byte - start_byte + 1) as usize;
+                    let mut buffer = vec![0; chunk_size];
+                    let bytes_read = drain_stream(get_object_output.body, &mut buffer).await.unwrap();
+                    buffer.truncate(bytes_read); // Ensure buffer only has valid bytes
+            
+                    (chunk_index, buffer)
+                }
+            }).collect();
+    
+            let mut chunks = join_all(download_futures).await;
+            chunks.sort_by(|(index1, _), (index2, _)| index1.partial_cmp(index2).unwrap());
+            let mut file = tokio::fs::File::create(lpath).await.unwrap();
+            for (_, buffer) in chunks {
+                file.write_all(&buffer).await.unwrap();
+            }
+        });
+    
         Ok(())
     }
 
