@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import os
 import shutil
@@ -9,6 +10,7 @@ from functools import wraps
 from typing import Callable, Optional
 
 import fsspec
+from flytekit.core.context_manager import FlyteContextManager
 
 from flytekit.loggers import logger
 
@@ -105,6 +107,63 @@ def download_vscode(
     os.environ["PATH"] = code_server_bin_dir + os.pathsep + os.environ["PATH"]
 
 
+def generate_launch_and_tasks_json(task_module: str, task_name: str, code_server_pid: int):
+    user_space_params = FlyteContextManager.current_context().execution_state.user_space_params
+    launch_json = {
+        "version": "0.2.0",
+        "configurations": [
+            {
+                "name": "Terminate VSCode and Resume Workflow",
+                "type": "python",
+                "request": "launch",
+                "program": "/usr/local/bin/pyflyte-execute",
+                "args": [
+                    "--inputs",
+                    user_space_params.output_metadata_prefix[:-2],
+                    "--output-prefix",
+                    user_space_params.output_metadata_prefix,
+                    "--raw-output-data-prefix",
+                    user_space_params.raw_output_prefix,
+                    "--checkpoint-path",
+                    user_space_params.checkpoint._checkpoint_dest,
+                    "--prev-checkpoint",
+                    "\"\"",
+                    "--resolver",
+                    "flytekit.core.python_auto_container.default_task_resolver",
+                    "--",
+                    "task-module",
+                    task_module,
+                    "task-name",
+                    task_name,
+                ],
+                "console": "integratedTerminal",
+                "justMyCode": True,
+                "postDebugTask": "kill-code-server",
+            }
+        ]
+    }
+    tasks_json = {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "kill-code-server",
+                "type": "shell",
+                "command": "kill",
+                "args": [code_server_pid]
+            }
+        ],
+    }
+    vscode_dir = ".vscode"
+    if not os.path.exists(vscode_dir):
+        os.makedirs(vscode_dir)
+    launch_json_path = os.path.join(vscode_dir, 'launch.json')
+    with open(launch_json_path, 'w') as file:
+        json.dump(launch_json, file, indent=4)
+    tasks_json_path = os.path.join(vscode_dir, 'tasks.json')
+    with open(tasks_json_path, 'w') as file:
+        json.dump(tasks_json, file, indent=4)
+
+
 def vscode(
     _task_function: Optional[Callable] = None,
     server_up_seconds: Optional[int] = DEFAULT_UP_SECONDS,
@@ -156,11 +215,17 @@ def vscode(
             child_process = multiprocessing.Process(
                 target=execute_command, kwargs={"cmd": f"code-server --bind-addr 0.0.0.0:{port} --auth none"}
             )
-
             child_process.start()
-            time.sleep(server_up_seconds)
+
+            generate_launch_and_tasks_json(
+                task_module=fn.__module__,
+                task_name=fn.__name__,
+                code_server_pid=child_process.pid,
+            )
+            # logger.info(f"child pid: {child_process.pid}")
 
             # 3. Terminates the server after server_up_seconds
+            time.sleep(server_up_seconds)
             logger.info(f"{server_up_seconds} seconds passed. Terminating...")
             if post_execute is not None:
                 post_execute()
