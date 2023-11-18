@@ -1,7 +1,9 @@
+import importlib
 import json
 import multiprocessing
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -10,7 +12,6 @@ from functools import wraps
 from typing import Callable, Optional
 
 import fsspec
-from flytekit.core.context_manager import FlyteContextManager
 
 from flytekit.loggers import logger
 
@@ -23,9 +24,12 @@ from .constants import (
 )
 
 
-def execute_command(cmd):
+def execute_command(cmd) -> None:
     """
     Execute a command in the shell.
+
+    Args:
+        cmd (str): The shell command to execute.
     """
 
     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -37,7 +41,7 @@ def execute_command(cmd):
     logger.info(f"stderr: {stderr}")
 
 
-def download_file(url, target_dir="."):
+def download_file(url, target_dir=".") -> str:
     """
     Download a file from a given URL using fsspec.
 
@@ -68,7 +72,7 @@ def download_file(url, target_dir="."):
 def download_vscode(
     code_server_remote_path: str,
     code_server_dir_name: str,
-):
+) -> None:
     """
     Download vscode server and plugins from remote to local and add the directory of binary executable to $PATH.
 
@@ -107,61 +111,55 @@ def download_vscode(
     os.environ["PATH"] = code_server_bin_dir + os.pathsep + os.environ["PATH"]
 
 
-def generate_launch_and_tasks_json(task_module: str, task_name: str, code_server_pid: int):
-    user_space_params = FlyteContextManager.current_context().execution_state.user_space_params
-    launch_json = {
-        "version": "0.2.0",
-        "configurations": [
-            {
-                "name": "Terminate VSCode and Resume Workflow",
-                "type": "python",
-                "request": "launch",
-                "program": "/usr/local/bin/pyflyte-execute",
-                "args": [
-                    "--inputs",
-                    user_space_params.output_metadata_prefix[:-2],
-                    "--output-prefix",
-                    user_space_params.output_metadata_prefix,
-                    "--raw-output-data-prefix",
-                    user_space_params.raw_output_prefix,
-                    "--checkpoint-path",
-                    user_space_params.checkpoint._checkpoint_dest,
-                    "--prev-checkpoint",
-                    "\"\"",
-                    "--resolver",
-                    "flytekit.core.python_auto_container.default_task_resolver",
-                    "--",
-                    "task-module",
-                    task_module,
-                    "task-name",
-                    task_name,
-                ],
-                "console": "integratedTerminal",
-                "justMyCode": True,
-                "postDebugTask": "kill-code-server",
-            }
-        ]
-    }
+def generate_tasks_json() -> None:
     tasks_json = {
         "version": "2.0.0",
         "tasks": [
-            {
-                "label": "kill-code-server",
-                "type": "shell",
-                "command": "kill",
-                "args": [code_server_pid]
-            }
+            {"label": "Back-to-Batch-Job", "type": "shell", "command": "kill", "args": ["-TERM", f"{os.getpid()}"]}
         ],
     }
     vscode_dir = ".vscode"
     if not os.path.exists(vscode_dir):
         os.makedirs(vscode_dir)
-    launch_json_path = os.path.join(vscode_dir, 'launch.json')
-    with open(launch_json_path, 'w') as file:
-        json.dump(launch_json, file, indent=4)
-    tasks_json_path = os.path.join(vscode_dir, 'tasks.json')
-    with open(tasks_json_path, 'w') as file:
+    tasks_json_path = os.path.join(vscode_dir, "tasks.json")
+    with open(tasks_json_path, "w") as file:
         json.dump(tasks_json, file, indent=4)
+
+
+def create_back_to_batch_job_handler(
+    post_execute: Optional[Callable],
+    code_server_process: multiprocessing.Process,
+    task_module: str,
+    task_name: str,
+    *args,
+    **kwargs,
+) -> Callable:
+    """
+    Create a signal handler for executing a specified task and then terminating the program.
+
+    Args:
+        post_execute (function, optional): Function to execute after the task.
+        code_server_process (multiprocessing.Process): The process running the code server.
+        task_module (str): The module where the task function is located.
+        task_name (str): The name of the task function.
+        *args, **kwargs: Arguments to pass to the task function.
+
+    Returns:
+        Callable: A signal handler function.
+    """
+
+    def back_to_batch_job_handler(signum, frame):
+        logger.info("Receive SIGTERM. Terminating...")
+        if post_execute is not None:
+            post_execute()
+            logger.info("Post execute function executed successfully!")
+        code_server_process.terminate()
+        code_server_process.join()
+        task_function = getattr(importlib.import_module(task_module), task_name)
+        task_function(*args, **kwargs)
+        sys.exit(0)
+
+    return back_to_batch_job_handler
 
 
 def vscode(
@@ -174,7 +172,7 @@ def vscode(
     code_server_dir_name: Optional[str] = DEFAULT_CODE_SERVER_DIR_NAME,
     pre_execute: Optional[Callable] = None,
     post_execute: Optional[Callable] = None,
-):
+) -> Callable:
     """
     vscode decorator modifies a container to run a VSCode server:
     1. Overrides the user function with a VSCode setup function.
@@ -192,7 +190,7 @@ def vscode(
         post_execute (function, optional): The function to be executed before the vscode is self-terminated.
     """
 
-    def wrapper(fn):
+    def wrapper(fn: Callable) -> Callable:
         if not enable:
             return fn
 
@@ -212,26 +210,34 @@ def vscode(
             # 2. Launches and monitors the VSCode server.
             # Run the function in the background
             logger.info(f"Start the server for {server_up_seconds} seconds...")
-            child_process = multiprocessing.Process(
+            code_server_process = multiprocessing.Process(
                 target=execute_command, kwargs={"cmd": f"code-server --bind-addr 0.0.0.0:{port} --auth none"}
             )
-            child_process.start()
+            code_server_process.start()
 
-            generate_launch_and_tasks_json(
+            # 3. generate tasks.json and register signal handler for back to batch job
+            logger.info("Generate tasks.json for back to batch job")
+            generate_tasks_json()
+
+            logger.info("Register signal handler for back to batch job")
+            back_to_batch_job_handler = create_back_to_batch_job_handler(
+                post_execute=post_execute,
+                code_server_process=code_server_process,
                 task_module=fn.__module__,
                 task_name=fn.__name__,
-                code_server_pid=child_process.pid,
+                *args,
+                **kwargs,
             )
-            # logger.info(f"child pid: {child_process.pid}")
+            signal.signal(signal.SIGTERM, back_to_batch_job_handler)
 
-            # 3. Terminates the server after server_up_seconds
+            # 4. Terminates the server after server_up_seconds
             time.sleep(server_up_seconds)
             logger.info(f"{server_up_seconds} seconds passed. Terminating...")
             if post_execute is not None:
                 post_execute()
                 logger.info("Post execute function executed successfully!")
-            child_process.terminate()
-            child_process.join()
+            code_server_process.terminate()
+            code_server_process.join()
             sys.exit(0)
 
         return inner_wrapper
