@@ -111,57 +111,36 @@ def download_vscode(
     os.environ["PATH"] = code_server_bin_dir + os.pathsep + os.environ["PATH"]
 
 
-def generate_tasks_json() -> None:
-    tasks_json = {
-        "version": "2.0.0",
-        "tasks": [
-            {"label": "Back-to-Batch-Job", "type": "shell", "command": "kill", "args": ["-TERM", f"{os.getpid()}"]}
-        ],
-    }
-    vscode_dir = ".vscode"
-    if not os.path.exists(vscode_dir):
-        os.makedirs(vscode_dir)
-    tasks_json_path = os.path.join(vscode_dir, "tasks.json")
-    with open(tasks_json_path, "w") as file:
-        json.dump(tasks_json, file, indent=4)
+def generate_back_to_batch_job_script() -> None:
+    file_name = "back_to_batch_job"
+    back_to_batch_job_sh = f"""#!/bin/bash
+echo "Terminating server and will back to batch job. Goodbye!"
+PID={os.getpid()}
+kill -TERM $PID
+"""
 
+    with open(file_name, "w") as file:
+        file.write(back_to_batch_job_sh)
+    os.chmod(file_name, 0o755)
+    logger.info(f"current working dir: {os.getcwd()}")
+    os.environ["PATH"] = os.getcwd() + os.pathsep + os.environ["PATH"]
+    logger.info(f'PATH: {os.environ["PATH"]}')
 
-def create_back_to_batch_job_handler(
-    post_execute: Optional[Callable],
-    code_server_process: multiprocessing.Process,
-    task_module: str,
-    task_name: str,
-    *args,
-    **kwargs,
-) -> Callable:
+def back_to_batch_job_handler(signum, frame):
     """
-    Create a signal handler for executing a specified task and then terminating the program.
+    TODO.
 
     Args:
-        post_execute (function, optional): Function to execute after the task.
-        code_server_process (multiprocessing.Process): The process running the code server.
-        task_module (str): The module where the task function is located.
-        task_name (str): The name of the task function.
-        *args, **kwargs: Arguments to pass to the task function.
-
-    Returns:
-        Callable: A signal handler function.
+        signum (): 
+        frame (): 
     """
-
-    def back_to_batch_job_handler(signum, frame):
-        logger.info("Receive SIGTERM. Terminating...")
-        if post_execute is not None:
-            post_execute()
-            logger.info("Post execute function executed successfully!")
-        code_server_process.terminate()
-        code_server_process.join()
-        task_function = getattr(importlib.import_module(task_module), task_name)
-        task_function(*args, **kwargs)
-        sys.exit(0)
-
-    return back_to_batch_job_handler
+    global back_to_batch_job
+    back_to_batch_job = True
+    return
 
 
+
+back_to_batch_job = False
 def vscode(
     _task_function: Optional[Callable] = None,
     server_up_seconds: Optional[int] = DEFAULT_UP_SECONDS,
@@ -217,29 +196,40 @@ def vscode(
 
             # 3. generate tasks.json and register signal handler for back to batch job
             logger.info("Generate tasks.json for back to batch job")
-            generate_tasks_json()
+            generate_back_to_batch_job_script()
 
-            logger.info("Register signal handler for back to batch job")
-            back_to_batch_job_handler = create_back_to_batch_job_handler(
-                post_execute=post_execute,
-                code_server_process=code_server_process,
-                task_module=fn.__module__,
-                task_name=fn.__name__,
-                *args,
-                **kwargs,
-            )
+            logger.info("Register signal handler for backing to batch job")
             signal.signal(signal.SIGTERM, back_to_batch_job_handler)
 
             # 4. Terminates the server after server_up_seconds
-            time.sleep(server_up_seconds)
+            sleep_interval = 0
+            while sleep_interval < server_up_seconds and not back_to_batch_job:
+                sleep_time = 10
+                time.sleep(sleep_time)
+                sleep_interval += sleep_time
+
             logger.info(f"{server_up_seconds} seconds passed. Terminating...")
             if post_execute is not None:
                 post_execute()
                 logger.info("Post execute function executed successfully!")
             code_server_process.terminate()
             code_server_process.join()
+
+            if back_to_batch_job:
+                logger.info("Back to batch job")
+                task_function = getattr(importlib.import_module(fn.__module__), fn.__name__)
+                while hasattr(task_function, '__wrapped__'):
+                    # logger.info("has __wrapped__")
+                    # if hasattr(task_function, '__vscode__'):
+                    #     logger.info("has __vscode__")
+                    #     task_function = task_function.__wrapped__
+                    #     break
+                    task_function = task_function.__wrapped__
+                return task_function(*args, **kwargs)
+            
             sys.exit(0)
 
+        # inner_wrapper.__vscode__ = True
         return inner_wrapper
 
     # for the case when the decorator is used without arguments
