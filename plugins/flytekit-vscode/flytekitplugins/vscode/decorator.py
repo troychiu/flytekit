@@ -1,5 +1,4 @@
 import importlib
-import json
 import multiprocessing
 import os
 import shutil
@@ -12,6 +11,7 @@ from functools import wraps
 from typing import Callable, Optional
 
 import fsspec
+from flytekit.core.context_manager import FlyteContextManager
 
 from flytekit.loggers import logger
 
@@ -138,7 +138,15 @@ def back_to_batch_job_handler(signum, frame):
     back_to_batch_job = True
     return
 
-
+def load_module_from_path(module_name, path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is not None:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    else:
+        raise ImportError(f"Module at {path} could not be loaded")
 
 back_to_batch_job = False
 def vscode(
@@ -151,6 +159,7 @@ def vscode(
     code_server_dir_name: Optional[str] = DEFAULT_CODE_SERVER_DIR_NAME,
     pre_execute: Optional[Callable] = None,
     post_execute: Optional[Callable] = None,
+    run_task_first=False,
 ) -> Callable:
     """
     vscode decorator modifies a container to run a VSCode server:
@@ -175,6 +184,21 @@ def vscode(
 
         @wraps(fn)
         def inner_wrapper(*args, **kwargs):
+            ctx = FlyteContextManager.current_context()
+            if ctx.execution_state.is_local_execution():
+                return fn(*args, **kwargs)
+            if run_task_first:
+                logger.info("Run task")
+                try:
+                    res = fn(*args, **kwargs)
+                    return res
+                except Exception as e:
+                    logger.info(f"task error: {e}")
+                    logger.info("Start hosting code server")
+    
+            shutil.copy(f"./{fn.__module__}.py", os.path.join(ctx.execution_state.working_dir, f"{fn.__module__}.py"))
+            generate_interactive_python(fn)
+
             # 0. Executes the pre_execute function if provided.
             if pre_execute is not None:
                 pre_execute()
@@ -217,13 +241,8 @@ def vscode(
 
             if back_to_batch_job:
                 logger.info("Back to batch job")
-                task_function = getattr(importlib.import_module(fn.__module__), fn.__name__)
+                task_function = getattr(load_module_from_path(fn.__module__, f"/root/{fn.__module__}.py"), fn.__name__)
                 while hasattr(task_function, '__wrapped__'):
-                    # logger.info("has __wrapped__")
-                    # if hasattr(task_function, '__vscode__'):
-                    #     logger.info("has __vscode__")
-                    #     task_function = task_function.__wrapped__
-                    #     break
                     task_function = task_function.__wrapped__
                 return task_function(*args, **kwargs)
             
@@ -238,3 +257,51 @@ def vscode(
     # for the case when the decorator is used with arguments
     else:
         return wrapper
+
+
+
+def generate_interactive_python(user_function):
+    task_module_name, task_name = user_function.__module__, user_function.__name__
+    working_dir = FlyteContextManager.current_context().execution_state.working_dir
+    # Create the file content
+    file_content = f"""from {task_module_name} import {task_name}
+from flytekit.core import utils
+from flytekit.core.context_manager import FlyteContextManager
+from flyteidl.core import literals_pb2 as _literals_pb2
+from flytekit.core.type_engine import TypeEngine
+from flytekit.models import literals as _literal_models
+import sys
+import importlib
+import os
+
+def load_module_from_path(module_name, path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is not None:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    else:
+        raise ImportError(f"Module could not be loaded")
+
+def get_inputs():
+    task_module_name, task_name = "{task_module_name}", "{task_name}"
+    working_dir = "{working_dir}"
+    ctx = FlyteContextManager()
+    local_inputs_file = os.path.join(working_dir, "inputs.pb")
+    input_proto = utils.load_proto_from_file(_literals_pb2.LiteralMap, local_inputs_file)
+    idl_input_literals = _literal_models.LiteralMap.from_flyte_idl(input_proto)
+    task_module = load_module_from_path(task_module_name, "{working_dir}/{task_module_name}.py")  # type: ignore
+    task_def = getattr(task_module, task_name)
+    native_inputs = TypeEngine.literal_map_to_kwargs(
+        ctx, idl_input_literals, task_def.python_interface.inputs
+    )
+    return native_inputs
+
+
+if __name__ == "__main__":
+    inputs = get_inputs()
+    print({task_name}(**inputs))
+"""
+    with open("interactive_debug.py", "w") as file:
+        file.write(file_content)
